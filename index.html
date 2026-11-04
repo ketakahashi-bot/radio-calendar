@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://script.google.com https://script.googleusercontent.com; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>ラジオ番組カレンダー</title>
+  <meta name="description" content="聴きたいラジオ番組の放送予定・投稿先・メモを一元管理する">
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#16150f" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="ラジオ番組">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="view"></div>
+  <nav id="tabs" class="tabs" aria-label="メイン"></nav>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript>このアプリには JavaScript が必要です。</noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
