@@ -300,9 +300,27 @@ const GAS_URL = 'https://script.google.com/macros/s/TEST/exec';
 
 ok(sync.isValidGasUrl(GAS_URL), '連携URLの形式を受け付ける');
 ok(!sync.isValidGasUrl('https://evil.example.com/exec'), '他のドメインは拒否');
+ok(sync.isValidGasUrl('https://script.google.com/a/macros/example.co.jp/s/AKfy_cb-1/exec'), 'Workspace のURLを受け付ける');
+ok(sync.isValidGasUrl(' https://script.google.com/macros/s/AKfy\n_cb-1/exec '), '改行や空白が混ざっても受け付ける');
+eq(sync.gasUrlProblem('https://script.google.com/macros/s/AKfy/exec'), null, '正しいURLは問題なし');
+ok(sync.gasUrlProblem('https://script.google.com/macros/s/AKfy/dev').includes('/dev'), '/dev のURLは理由を説明する');
+ok(sync.gasUrlProblem('https://script.google.com/u/0/home/projects/abc/edit').includes('エディタ'), 'エディタのURLは理由を説明する');
+ok(sync.gasUrlProblem(''), '空のURLは拒否');
+eq(sync.cleanCredential(' ab\ncd '), 'abcd', '合言葉の改行や空白を除去');
+{
+  const original = globalThis.fetch;
+  let msg = null;
+  globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await sync.callGas('connect', {}, { url: GAS_URL, secret: 'x' }).catch((e) => { msg = e.message; });
+  ok(msg?.includes('全員'), '接続できないときは公開設定の確認を案内');
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, error: 'Calendar is not defined' }));
+  await sync.callGas('connect', {}, { url: GAS_URL, secret: 'x' }).catch((e) => { msg = e.message; });
+  ok(msg?.includes('appsscript.json'), 'Calendar が未定義なら manifest の確認を案内');
+  globalThis.fetch = original;
+}
 let badSecret = null;
 await sync.connect(GAS_URL, 'wrong').catch((e) => { badSecret = e.message; });
-eq(badSecret, '合言葉が一致しません', '合言葉が違えば接続できない');
+ok(badSecret?.startsWith('合言葉が一致しません'), '合言葉が違えば接続できない');
 ok(!sync.isLinked(), '失敗時は連携状態にならない');
 
 await sync.connect(GAS_URL, secret);

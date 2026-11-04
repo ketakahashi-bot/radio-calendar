@@ -23,7 +23,11 @@ function setup() {
     secret = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
     props.setProperty(PROP_KEYS.secret, secret);
   }
-  var url = ScriptApp.getService().getUrl() || '（未デプロイ。デプロイ後にもう一度 setup を実行してください）';
+  // エディタから実行するとテスト用の /dev のURLが返ることがあるので、/exec のときだけ案内に使う
+  var serviceUrl = ScriptApp.getService().getUrl() || '';
+  var url = /\/exec$/.test(serviceUrl)
+    ? serviceUrl
+    : '「デプロイ > デプロイを管理」に出ている、末尾が /exec のウェブアプリURLをコピーしてください';
   Logger.log('連携用URL: ' + url);
   Logger.log('合言葉: ' + secret);
   MailApp.sendEmail(

@@ -2,7 +2,7 @@
 
 import { h, page, section, button, toast, rerender, confirmSheet, chooseSheet, openForm, externalLink } from '../ui.js';
 import { all, exportAll, getSetting, importAll, remove, save, setSetting, notifyChange } from '../store.js';
-import { backupToDrive, connect, disconnect, isLinked, isValidGasUrl, listDriveBackups, resyncAll, restoreFromDrive, syncStatus, syncNow } from '../sync.js';
+import { backupToDrive, cleanCredential, connect, disconnect, gasUrlProblem, isLinked, listDriveBackups, resyncAll, restoreFromDrive, syncStatus, syncNow } from '../sync.js';
 import { fmtInstant } from '../time.js';
 
 const fmtTime = (ms) => (ms ? fmtInstant(ms) : '—');
@@ -28,8 +28,9 @@ export function refreshSyncStatus() {
 }
 
 function linkForm() {
-  const urlInput = h('input', { id: 's-url', type: 'url', inputMode: 'url', placeholder: 'https://script.google.com/macros/s/…/exec', value: '' });
-  const secretInput = h('input', { id: 's-secret', type: 'password', autocomplete: 'off', value: '' });
+  // type="url" だと貼り付け時にブラウザが値を整形することがあるので text にする
+  const urlInput = h('input', { id: 's-url', type: 'text', inputMode: 'url', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, placeholder: 'https://script.google.com/macros/s/…/exec', value: '' });
+  const secretInput = h('input', { id: 's-secret', type: 'password', autocomplete: 'off', autocapitalize: 'off', value: '' });
   const err = h('small', { class: 'field-error', role: 'alert' });
   const submit = h('button', { type: 'submit', class: 'btn primary' }, '連携する');
   return h('form', {
@@ -37,9 +38,10 @@ function linkForm() {
     onsubmit: async (e) => {
       e.preventDefault();
       err.textContent = '';
-      const url = urlInput.value.trim();
-      const secret = secretInput.value.trim();
-      if (!isValidGasUrl(url)) { err.textContent = 'GAS を「ウェブアプリ」として公開したときの URL（/exec で終わるもの）を入力してください'; return; }
+      const url = cleanCredential(urlInput.value);
+      const secret = cleanCredential(secretInput.value);
+      const problem = gasUrlProblem(url);
+      if (problem) { err.textContent = problem; return; }
       if (!secret) { err.textContent = '合言葉を入力してください'; return; }
       submit.disabled = true;
       submit.textContent = '接続中…';
@@ -55,7 +57,8 @@ function linkForm() {
     },
   },
   h('p', { class: 'help' }, 'Google 連携には、自分の Google アカウントに GAS（無料）を設置します。手順はアプリと一緒に配布している README を参照してください。'),
-  h('div', { class: 'field' }, h('label', { for: 's-url' }, '連携用URL'), urlInput),
+  h('div', { class: 'field' }, h('label', { for: 's-url' }, '連携用URL'), urlInput,
+    h('small', { class: 'help' }, 'GAS の「デプロイ > デプロイを管理」に出ている、末尾が /exec のウェブアプリURLです')),
   h('div', { class: 'field' }, h('label', { for: 's-secret' }, '合言葉'), secretInput),
   err,
   h('div', { class: 'sheet-actions' }, submit));

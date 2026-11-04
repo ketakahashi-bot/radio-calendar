@@ -22,28 +22,60 @@ let retryTimer = null;
 export const isLinked = () => !!(getSetting('gasUrl') && getSetting('gasSecret'));
 const announce = () => globalThis.dispatchEvent?.(new CustomEvent('sync-status'));
 
+/** メールからのコピーで混ざる改行や空白を取り除く */
+export const cleanCredential = (s) => String(s ?? '').replace(/\s+/g, '');
+
 export function isValidGasUrl(url) {
-  return /^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[\w-]+\/exec$/.test(String(url).trim());
+  return /^https:\/\/script\.google\.com\/(macros\/|a\/macros\/[^/]+\/|a\/[^/]+\/macros\/)s\/[\w-]+\/exec$/.test(cleanCredential(url));
+}
+
+/** 連携用URLの問題点を、直し方が分かる文で返す。問題なければ null */
+export function gasUrlProblem(raw) {
+  const url = cleanCredential(raw);
+  if (isValidGasUrl(url)) return null;
+  if (!url) return '連携用URLを入力してください';
+  if (/\/dev$/.test(url)) {
+    return '末尾が /dev のURLはテスト用なので使えません。GAS の「デプロイ > デプロイを管理」で、末尾が /exec のウェブアプリURLをコピーしてください';
+  }
+  if (/script\.google\.com\/.*\/(edit|home)/.test(url) || /script\.google\.com\/home/.test(url)) {
+    return 'これは GAS のエディタのURLです。「デプロイ > デプロイを管理」で、末尾が /exec のウェブアプリURLをコピーしてください';
+  }
+  return '連携用URLは https://script.google.com/ で始まり /exec で終わります。GAS の「デプロイ > デプロイを管理」でウェブアプリURLをコピーしてください';
+}
+
+/** GAS から返るエラーを、対処が分かる文に置き換える */
+function explainGasError(error) {
+  if (error === 'unauthorized') return '合言葉が一致しません。setup のメールの合言葉をコピーし直してください';
+  if (/is not defined/.test(error || '')) {
+    return `GAS の appsscript.json が反映されていません。README の手順で置き換えて「新しいバージョン」でデプロイし直してください（${error}）`;
+  }
+  return error || '不明なエラー';
 }
 
 export async function callGas(action, params = {}, creds = null) {
   const url = creds?.url || getSetting('gasUrl');
   const secret = creds?.secret || getSetting('gasSecret');
-  const res = await fetch(url, {
-    method: 'POST',
-    // text/plain にすると CORS のプリフライトが発生せず GAS で受けられる
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ secret, action, ...params }),
-    redirect: 'follow',
-  });
-  if (!res.ok) throw new Error(`通信エラー (${res.status})`);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      // text/plain にすると CORS のプリフライトが発生せず GAS で受けられる
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ secret, action, ...params }),
+      redirect: 'follow',
+    });
+  } catch {
+    // 「全員」以外で公開すると Google のログイン画面が返り、ブラウザではこの通信エラーになる
+    throw new Error('GAS に接続できません。通信状態と、デプロイの「アクセスできるユーザー」が「全員」になっているか確認してください');
+  }
+  if (!res.ok) throw new Error(`通信エラー (${res.status})。連携用URLとデプロイ設定を確認してください`);
   let json;
   try {
     json = await res.json();
   } catch {
-    throw new Error('連携用URLの応答を読み取れません。URLとデプロイ設定を確認してください');
+    throw new Error('連携用URLの応答を読み取れません。デプロイの種類が「ウェブアプリ」で、「全員」に公開されているか確認してください');
   }
-  if (!json.ok) throw new Error(json.error === 'unauthorized' ? '合言葉が一致しません' : json.error || '不明なエラー');
+  if (!json.ok) throw new Error(explainGasError(json.error));
   return json;
 }
 

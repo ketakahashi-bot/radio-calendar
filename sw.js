@@ -1,7 +1,7 @@
 // アプリ本体をキャッシュしてオフラインで起動できるようにする。
 // ファイルを変更したら VERSION を上げること。
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = `radio-calendar-${VERSION}`;
 const FILES = [
   './',
