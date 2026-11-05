@@ -1,8 +1,10 @@
 // カレンダー画面（月・週・日）
 
 import { h, page, button, linkButton, empty, externalLink, rerender } from '../ui.js';
+import { composeX } from '../mail.js';
+import { backupWarning } from '../sync.js';
 import { getSetting, setSetting, all, byProgram } from '../store.js';
-import { occurrences, marksInRange, nowNext, boundary } from '../episodes.js';
+import { occurrences, marksInRange, nowNext, boundary, fmtOcc } from '../episodes.js';
 import { textOn, safeUrl } from '../domain.js';
 import { addSample } from '../sample.js';
 import {
@@ -34,6 +36,7 @@ function nowCards() {
         h('span', { class: 'onair-badge' }, 'ON AIR'),
         h('strong', null, o.program.name),
         h('small', null, `${occTime(o)}・残り${fmtRemaining(o.endMs - now)}`)),
+      (o.program.hashtags || []).length ? button('実況', () => composeX({ program: o.program, text: `${o.program.hashtags.join(' ')} ` }), 'small') : null,
       listenButton(o)));
   }
   if (next) {
@@ -41,7 +44,7 @@ function nowCards() {
       h('a', { class: 'now-main', href: `#/ep/${next.key}` },
         h('span', { class: 'next-badge' }, '次の放送'),
         h('strong', null, next.program.name),
-        h('small', null, `${fmtInstant(next.startMs)}・あと${fmtRemaining(next.startMs - now)}`)),
+        h('small', null, `${fmtOcc(next)}・あと${fmtRemaining(next.startMs - now)}`)),
       null));
   }
   return cards;
@@ -298,6 +301,7 @@ export function renderCalendar() {
     hasPrograms ? null : empty('番組を登録すると、放送予定がここに並びます。', h('div', { class: 'row-actions center' },
       linkButton('番組を登録', '#/program/new', 'primary'),
       button('サンプルを追加', () => { addSample(); rerender(); }))),
+    backupWarning() ? h('a', { class: 'notice warn', href: '#/settings' }, `${backupWarning()}。設定画面でバックアップしてください`) : null,
     h('div', { id: 'now-cards', class: 'now-cards' }, nowCards()),
     h('div', { id: 'cal-box' }, controls(), viewBody()));
   st.scrollNow = st.view !== 'month';

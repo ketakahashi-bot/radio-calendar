@@ -52,17 +52,49 @@ export function externalLink(label, url, cls = 'btn') {
 }
 
 export function colorDot(program) {
-  if (program.icon) return h('img', { class: 'prog-icon', src: program.icon, alt: '' });
-  return h('span', { class: 'prog-icon', style: `background:${program.color};color:${textOn(program.color)}`, 'aria-hidden': 'true' }, (program.name || '?').slice(0, 1));
+  const style = `background:${program.color};color:${textOn(program.color)}`;
+  if (GENERIC_ICONS[program.icon]) return h('span', { class: 'prog-icon', style, 'aria-hidden': 'true' }, svgIcon(program.icon));
+  return h('span', { class: 'prog-icon', style, 'aria-hidden': 'true' }, (program.name || '?').slice(0, 1));
+}
+
+/** 番組に使える汎用アイコン（番組ロゴ・画像は権利の都合で扱わない） */
+export const GENERIC_ICONS = {
+  radio: { label: 'ラジオ', d: 'M4 9.5 18 4M5 9.5h14A1.5 1.5 0 0 1 20.5 11v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19v-8A1.5 1.5 0 0 1 5 9.5ZM8 16.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6ZM14 13.5h3.5M14 16.5h3.5' },
+  mic: { label: 'マイク', d: 'M12 3.5a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0v-5a3 3 0 0 1 3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M8.5 20.5h7' },
+  music: { label: '音楽', d: 'M9 18V5.5l11-2V16M9 18a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0ZM20 16a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z' },
+  headphones: { label: 'ヘッドホン', d: 'M4 17v-4a8 8 0 0 1 16 0v4M4 15h3v5H5a1 1 0 0 1-1-1v-4ZM20 15h-3v5h2a1 1 0 0 0 1-1v-4Z' },
+  chat: { label: 'トーク', d: 'M4 5.5h16v10H9l-5 4v-14ZM8 9.5h8M8 12.5h5' },
+  moon: { label: '深夜', d: 'M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10Z' },
+  sun: { label: '朝', d: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4' },
+  star: { label: '星', d: 'm12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8-5.2-2.8-5.2 2.8 1-5.8-4.3-4.1 5.9-.8L12 3.5Z' },
+  video: { label: '動画', d: 'M3.5 6.5h12v11h-12zM15.5 10.5l5-3v9l-5-3' },
+  sport: { label: 'スポーツ', d: 'M12 20.5a8.5 8.5 0 1 0 0-17 8.5 8.5 0 0 0 0 17ZM3.5 12h17M12 3.5c2.5 2.3 3.8 5.2 3.8 8.5s-1.3 6.2-3.8 8.5M12 3.5C9.5 5.8 8.2 8.7 8.2 12s1.3 6.2 3.8 8.5' },
+};
+
+export function svgIcon(id) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('class', 'gicon');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', GENERIC_ICONS[id]?.d || '');
+  svg.append(path);
+  return svg;
 }
 
 let toastTimer = null;
-export function toast(message, { error = false } = {}) {
+/** action: { label, onClick } を渡すとボタン付きで長めに表示する */
+export function toast(message, { error = false, action = null } = {}) {
   const el = document.getElementById('toast');
-  el.textContent = message;
-  el.className = `toast show ${error ? 'error' : ''}`;
+  el.replaceChildren(...[h('span', null, message), action ? h('button', {
+    type: 'button',
+    class: 'toast-action',
+    onclick: () => { el.className = 'toast'; action.onClick(); },
+  }, action.label) : null].filter(Boolean));
+  el.className = `toast show ${error ? 'error' : ''} ${action ? 'has-action' : ''}`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = 'toast'; }, error ? 5000 : 2200);
+  toastTimer = setTimeout(() => { el.className = 'toast'; }, action ? 8000 : error ? 5000 : 2200);
 }
 
 export async function copyText(text, label = 'コピーしました') {

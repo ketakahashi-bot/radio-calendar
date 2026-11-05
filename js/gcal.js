@@ -3,9 +3,9 @@
 
 import { all, get, byProgram, getSetting } from './store.js';
 import { googleSeries, scheduleMinutes, describeSchedule } from './rrule.js';
-import { TZ, instant, isoJst, jstDay, ymdToDay, dayParts, monthStart, parseHM, fmtInstant, parseLocalDateTime, dayToYmd } from './time.js';
+import { TZ, instant, isoJst, jstDay, ymdToDay, dayParts, monthStart, parseHM, fmtHM, fmtInstant, parseLocalDateTime, dayToYmd, weekdayLabel, weekdayOf } from './time.js';
 import { colorIdOf, mediaLabel } from './domain.js';
-import { hasOverride, isProgramActive } from './episodes.js';
+import { hasOverride, isProgramActive, radikoDays } from './episodes.js';
 
 const MAX_REMINDERS = 5; // Google カレンダーの上限
 
@@ -59,6 +59,20 @@ function horizonDay(now) {
   return monthStart(dayParts(jstDay(now)).y + 3, 1);
 }
 
+/** タイムフリー非対応の番組は、放送開始の通知を必ず入れる（F-TF-05） */
+function broadcastReminders(program, minutes) {
+  const list = minutes ?? program.reminders ?? [15];
+  return program.timefree === false && !list.length ? [0] : list;
+}
+
+/** 予定のタイトルに添える深夜表記（「月25:00」）。24時以降の放送だけ */
+function lateNightLabel(day, startMin) {
+  return startMin >= 1440 ? `（${weekdayLabel(weekdayOf(day))}${fmtHM(startMin)}）` : '';
+}
+
+/** 締切や聴取期限を個別に通知するか（F-NTF-05）。初期設定では今日のまとめに集約する */
+const individual = (x) => x?.individualNotify === true;
+
 const needsOwnEvent = (ep) => ep.status === 'special' || ep.status === 'changed' || hasOverride(ep) || Array.isArray(ep.reminders);
 
 const STATUS_PREFIX = { special: '【特番】', changed: '【時間変更】' };
@@ -75,7 +89,7 @@ export function buildDesired(now = Date.now()) {
     const startDay = program.startDate ? ymdToDay(program.startDate) : null;
     const endDay = program.endDate ? ymdToDay(program.endDate) : null;
     const episodes = byProgram('episodes', program.id);
-    const channels = byProgram('channels', program.id).filter((c) => c.catchupDays > 0);
+    const channels = byProgram('channels', program.id).filter((c) => c.catchupMode === 'radiko' || (c.catchupMode === 'days' && c.catchupDays > 0));
 
     for (const s of byProgram('schedules', program.id)) {
       const { start, end } = scheduleMinutes(s);
@@ -84,19 +98,23 @@ export function buildDesired(now = Date.now()) {
 
       const series = googleSeries(s, { offsetMin: start, exDays, startDay, endDay, horizonDay: horizon });
       if (series) {
-        const payload = basePayload(program, program.name, instant(series.firstDay, start), instant(series.firstDay, end), program.reminders ?? [15]);
+        const title = `${program.name}${lateNightLabel(series.firstDay, start)}`;
+        const payload = basePayload(program, title, instant(series.firstDay, start), instant(series.firstDay, end), broadcastReminders(program));
         payload.recurrence = series.lines;
         out.set(`sch:${s.id}`, { kind: 'event', payload });
       }
 
-      if (withCatchup) {
+      if (withCatchup || individual(program)) {
         for (const ch of channels) {
-          const offset = end + (ch.offsetMin || 0) + ch.catchupDays * 1440;
+          if (program.timefree === false) continue;
+          const offset = ch.catchupMode === 'radiko'
+            ? start + radikoDays() * 1440
+            : end + (ch.offsetMin || 0) + ch.catchupDays * 1440;
           const cancelled = own.filter((e) => e.status === 'cancelled').map((e) => ymdToDay(e.date));
           const cs = googleSeries(s, { offsetMin: offset, exDays: cancelled, startDay, endDay, horizonDay: horizon });
           if (!cs) continue;
           const name = [mediaLabel(ch.mediaType), ch.station].filter(Boolean).join(' ');
-          const payload = basePayload(program, `⏳ 聴き逃し期限: ${program.name}（${name}）`, instant(cs.firstDay, offset - 15), instant(cs.firstDay, offset), [1440]);
+          const payload = basePayload(program, `⏳ 聴取期限: ${program.name}（${name}）`, instant(cs.firstDay, offset - 15), instant(cs.firstDay, offset), individual(program) ? [1440] : []);
           payload.recurrence = cs.lines;
           out.set(`cu:${s.id}:${ch.id}`, { kind: 'event', payload });
         }
@@ -108,7 +126,7 @@ export function buildDesired(now = Date.now()) {
       if (ep.scheduleId && !needsOwnEvent(ep)) continue;
       const schedule = ep.scheduleId ? get('schedules', ep.scheduleId) : null;
       if (ep.scheduleId && !schedule) continue;
-      let day = ymdToDay(ep.overrideDate || ep.date);
+      const day = ymdToDay(ep.overrideDate || ep.date);
       let startMin;
       let endMin;
       if (hasOverride(ep)) {
@@ -119,15 +137,15 @@ export function buildDesired(now = Date.now()) {
       } else {
         ({ start: startMin, end: endMin } = scheduleMinutes(schedule));
       }
-      const label = `${STATUS_PREFIX[ep.status] || ''}${program.name}${ep.title ? ` ${ep.title}` : ''}`;
-      const payload = basePayload(program, label, instant(day, startMin), instant(day, endMin), Array.isArray(ep.reminders) ? ep.reminders : (program.reminders ?? [15]));
+      const label = `${STATUS_PREFIX[ep.status] || ''}${program.name}${ep.title ? ` ${ep.title}` : ''}${lateNightLabel(day, startMin)}`;
+      const payload = basePayload(program, label, instant(day, startMin), instant(day, endMin), broadcastReminders(program, Array.isArray(ep.reminders) ? ep.reminders : null));
       out.set(`ep:${ep.id}`, { kind: 'event', payload });
     }
 
-    if (withDeadlines) {
-      for (const c of byProgram('corners', program.id)) {
-        const ms = parseLocalDateTime(c.deadline);
-        if (ms == null || (c.status && c.status !== 'active')) continue;
+    for (const c of byProgram('corners', program.id)) {
+      const ms = parseLocalDateTime(c.deadline);
+      if (ms == null || (c.status && c.status !== 'active') || program.archived) continue;
+      if (withDeadlines) {
         out.set(`task:${c.id}`, {
           kind: 'task',
           payload: {
@@ -136,6 +154,9 @@ export function buildDesired(now = Date.now()) {
             due: `${dayToYmd(jstDay(ms))}T00:00:00.000Z`,
           },
         });
+      }
+      if (individual(c) && ms > now) {
+        out.set(`dl:${c.id}`, { kind: 'event', payload: basePayload(program, `✉ 締切: ${program.name} ${c.name}`, ms - 15 * 60000, ms, [1440, 60]) });
       }
     }
   }

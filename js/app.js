@@ -9,11 +9,17 @@ import { renderChannels } from './views/media.js';
 import { renderCorners, renderPost } from './views/corners.js';
 import { renderMemos } from './views/memos.js';
 import { renderSettings, refreshSyncStatus } from './views/settings.js';
+import { renderUnheard } from './views/unheard.js';
+import { renderNotifyGuide, renderMigrateGuide } from './views/guide.js';
+import { all, save } from './store.js';
+import { todayDay } from './episodes.js';
+import { dayToYmd } from './time.js';
 import { requestSync, startSyncLoop } from './sync.js';
 
 const TABS = [
   { id: 'calendar', label: 'カレンダー', href: '#/calendar', icon: 'M7 2v3M17 2v3M3.5 9h17M5 4.5h14A1.5 1.5 0 0 1 20.5 6v13a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19V6A1.5 1.5 0 0 1 5 4.5Z' },
   { id: 'programs', label: '番組一覧', href: '#/programs', icon: 'M4 9.5 18 4M5 9.5h14A1.5 1.5 0 0 1 20.5 11v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19v-8A1.5 1.5 0 0 1 5 9.5ZM8 16.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6ZM14 13.5h3.5M14 16.5h3.5' },
+  { id: 'unheard', label: '未聴', href: '#/unheard', icon: 'M12 20.5a8.5 8.5 0 1 0 0-17 8.5 8.5 0 0 0 0 17ZM12 7.5V12l3 2' },
   { id: 'post', label: '投稿', href: '#/post', icon: 'M3.5 6.5h17v11a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5v-11ZM3.5 6.5 12 13l8.5-6.5' },
   { id: 'settings', label: '設定', href: '#/settings', icon: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 9.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4ZM9 19.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z' },
 ];
@@ -36,7 +42,9 @@ function route(hash) {
     case undefined:
     case 'calendar': return renderCalendar();
     case 'programs': return renderPrograms();
+    case 'unheard': return renderUnheard();
     case 'post': return renderPost();
+    case 'guide': return b === undefined && a === 'migrate' ? renderMigrateGuide() : renderNotifyGuide();
     case 'settings': return renderSettings();
     case 'ep': return renderEpisode(a);
     case 'program':
@@ -48,6 +56,14 @@ function route(hash) {
       if (b === 'episodes') return renderProgramEpisodes(a);
       return renderProgram(a);
     default: return notFound();
+  }
+}
+
+/** 放送期間が終わった番組をアーカイブへ移す（F-PRG-06） */
+function autoArchive() {
+  const today = dayToYmd(todayDay());
+  for (const p of all('programs')) {
+    if (!p.archived && p.endDate && p.endDate < today) save('programs', { ...p, archived: true }, { silent: true });
   }
 }
 
@@ -83,6 +99,7 @@ function mountShell() {
 
 async function boot() {
   await initStore();
+  autoArchive();
   mountShell();
   setRerender(render);
   window.addEventListener('hashchange', render);
@@ -94,9 +111,9 @@ async function boot() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshNow(); });
   startSyncLoop();
   navigator.storage?.persist?.().catch(() => {});
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('Service Worker を登録できません', e));
-  } else if ('serviceWorker' in navigator && location.hostname === 'localhost') {
+  // 開発中（localhost）は古いファイルが残らないよう使わない。?sw を付けると試せる
+  const useSw = location.protocol === 'https:' || new URLSearchParams(location.search).has('sw');
+  if ('serviceWorker' in navigator && useSw) {
     navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('Service Worker を登録できません', e));
   }
 }

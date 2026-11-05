@@ -2,11 +2,17 @@
 
 import { all, get, save, getSetting } from './store.js';
 import { expand, scheduleMinutes } from './rrule.js';
-import { DAY_MS, instant, jstDay, logicalDay, parseHM, ymdToDay, dayToYmd, parseLocalDateTime } from './time.js';
+import { DAY_MS, instant, jstDay, logicalDay, parseHM, ymdToDay, dayToYmd, parseLocalDateTime, fmtDay, fmtHM } from './time.js';
 
-export const boundary = () => getSetting('dayBoundary', 300);
+/** 1日は 5:00 に始まる（第2版で固定） */
+export const BOUNDARY = 300;
+export const boundary = () => BOUNDARY;
+export const todayDay = (now = Date.now()) => logicalDay(now, BOUNDARY);
 
-export const isProgramActive = (p) => p && !p.deleted && !p.archived;
+/**
+ * カレンダーに出す番組か。アーカイブ済みでも放送期間の終了日があれば、その日までの記録は残す。
+ */
+export const isProgramActive = (p) => !!p && !p.deleted && (!p.archived || !!p.endDate);
 
 function withinPeriod(program, day) {
   if (program.startDate && day < ymdToDay(program.startDate)) return false;
@@ -47,6 +53,9 @@ function occFromEpisode(ep, program, schedule) {
   const key = ep.scheduleId ? scheduleKey(ep.scheduleId, ep.date) : `e~${ep.id}`;
   return makeOcc(program, schedule, ep, t.day, t.start, t.end, key);
 }
+
+/** 放送回の日時を深夜表記で（「11/9(月) 25:00」） */
+export const fmtOcc = (o) => `${fmtDay(o.day)} ${fmtHM(o.startMin)}`;
 
 export const hasOverride = (ep) => !!(ep && (ep.overrideStart != null && ep.overrideStart !== ''));
 
@@ -115,7 +124,9 @@ export function saveEpisode(occ, patch) {
     status: 'normal',
     listened: false,
   };
-  return save('episodes', { ...base, ...patch });
+  const saved = save('episodes', { ...base, ...patch });
+  occ.episode = saved;
+  return saved;
 }
 
 export function nowNext(now = Date.now()) {
@@ -134,18 +145,49 @@ export function nextByProgram(now = Date.now()) {
   return map;
 }
 
-/** 聴取手段ごとの聴き逃し期限 */
+// ---- 聴き逃し配信の期限（F-TF） ----
+
+export const radikoPlan = () => getSetting('radikoPlan', 'free');
+export const radikoDays = () => (radikoPlan() === 'tf30' ? 30 : 7);
+
+/** 聴取手段ごとの聴き逃し期限。radiko は放送開始からプランの日数、それ以外は放送終了からの日数 */
 export function catchupExpiry(occ, channel) {
-  if (!channel.catchupDays) return null;
-  return occ.endMs + (channel.offsetMin || 0) * 60000 + channel.catchupDays * DAY_MS;
+  if (occ.program.timefree === false) return null;
+  if (channel.catchupMode === 'radiko') return occ.startMs + radikoDays() * DAY_MS;
+  if (channel.catchupMode === 'days' && channel.catchupDays > 0) {
+    return occ.endMs + (channel.offsetMin || 0) * 60000 + channel.catchupDays * DAY_MS;
+  }
+  return null;
 }
 
-/** 論理日ごとの締切・聴き逃し期限マーク。返り値: Map<logicalDay, mark[]> */
+export const catchupChannels = (programId) => all('channels').filter((c) => c.programId === programId
+  && (c.catchupMode === 'radiko' || (c.catchupMode === 'days' && c.catchupDays > 0)));
+
+/** その回を聴ける最後の時刻（聴取手段の中で一番遅いもの）。聴き逃し配信がなければ null */
+export function latestExpiry(occ) {
+  const list = catchupChannels(occ.program.id).map((c) => catchupExpiry(occ, c)).filter((x) => x != null);
+  return list.length ? Math.max(...list) : null;
+}
+
+/** 無料タイムフリーの「聴き始めてから24時間・合計3時間」（F-TF-04） */
+export function timefreeStatus(occ, now = Date.now()) {
+  const ep = occ.episode;
+  if (!ep?.tfStartedAt) return null;
+  const windowLeft = ep.tfStartedAt + DAY_MS - now;
+  const used = ep.listenedMinutes || 0;
+  return {
+    windowLeftMs: Math.max(windowLeft, 0),
+    expired: windowLeft <= 0,
+    usedMinutes: used,
+    leftMinutes: radikoPlan() === 'free' ? Math.max(180 - used, 0) : null,
+  };
+}
+
+/** 論理日ごとの締切・聴取期限マーク。返り値: Map<logicalDay, mark[]> */
 export function marksInRange(fromDay, toDay) {
-  const b = boundary();
   const marks = new Map();
   const add = (ms, mark) => {
-    const d = logicalDay(ms, b);
+    const d = logicalDay(ms, BOUNDARY);
     if (d < fromDay || d > toDay) return;
     if (!marks.has(d)) marks.set(d, []);
     marks.get(d).push({ ...mark, ms });
@@ -154,18 +196,18 @@ export function marksInRange(fromDay, toDay) {
     if (c.status && c.status !== 'active') continue;
     const program = get('programs', c.programId);
     const ms = parseLocalDateTime(c.deadline);
-    if (ms == null || !isProgramActive(program)) continue;
+    if (ms == null || !program || program.archived) continue;
     add(ms, { type: 'deadline', program, corner: c, label: `${c.name} 締切` });
   }
-  const channels = all('channels').filter((c) => c.catchupDays > 0);
+  const channels = all('channels').filter((c) => c.catchupMode === 'radiko' || (c.catchupMode === 'days' && c.catchupDays > 0));
   if (channels.length) {
-    const maxDays = Math.max(...channels.map((c) => c.catchupDays + (c.offsetMin || 0) / 1440));
-    const from = instant(fromDay) - (maxDays + 1) * DAY_MS;
-    const occs = occurrences(from, instant(toDay + 2)).filter((o) => o.status !== 'cancelled' && !o.listened);
+    const maxDays = Math.max(radikoDays(), ...channels.map((c) => (c.catchupDays || 0) + (c.offsetMin || 0) / 1440)) + 1;
+    const occs = occurrences(instant(fromDay) - maxDays * DAY_MS, instant(toDay + 2)).filter((o) => o.status !== 'cancelled' && !o.listened);
     for (const occ of occs) {
       for (const ch of channels) {
         if (ch.programId !== occ.program.id) continue;
-        add(catchupExpiry(occ, ch), { type: 'catchup', program: occ.program, occ, channel: ch, label: `${occ.program.name} 聴き逃し期限` });
+        const ms = catchupExpiry(occ, ch);
+        if (ms != null) add(ms, { type: 'catchup', program: occ.program, occ, channel: ch, label: `${occ.program.name} 聴取期限` });
       }
     }
   }
@@ -173,9 +215,22 @@ export function marksInRange(fromDay, toDay) {
   return marks;
 }
 
-/** 未聴の放送回（直近14日、番組登録より後のもの） */
+/**
+ * 未聴の放送回（F-REM-09）。聴き逃し配信がある回は期限内のもの、ない回は直近14日。
+ * 返り値は期限の近い順。期限のない回は後ろ。
+ */
 export function unheard(now = Date.now()) {
-  return occurrences(now - 14 * DAY_MS, now)
+  const span = Math.max(radikoDays(), 14, ...all('channels').map((c) => c.catchupDays || 0)) + 1;
+  return occurrences(now - span * DAY_MS, now)
     .filter((o) => o.endMs <= now && o.status !== 'cancelled' && !o.listened && o.startMs >= o.program.createdAt)
-    .reverse();
+    .map((o) => ({ ...o, expiry: latestExpiry(o) }))
+    .filter((o) => (o.expiry != null ? o.expiry > now : o.endMs > now - 14 * DAY_MS))
+    .sort((a, b) => (a.expiry ?? Infinity) - (b.expiry ?? Infinity) || b.startMs - a.startMs);
 }
+
+/** 未聴の新着の回（F-FEED-04） */
+export const unheardFeedItems = () => all('feedItems')
+  .filter((f) => !f.listened && get('programs', f.programId))
+  .sort((a, b) => b.publishedAt - a.publishedAt);
+
+export { todayDay as logicalToday };

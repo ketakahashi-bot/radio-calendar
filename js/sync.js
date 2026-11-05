@@ -1,17 +1,23 @@
 // GAS 中継への同期とバックアップ。
 // あるべき状態（buildDesired）と Google に送信済みの状態（gcalMap）の差分を SyncQueue に積み、順に送る。
+// あわせて、新着検知の対象（feeds）と今日のまとめの材料（digest）を GAS に渡し、検知した新着の回を受け取る。
 
 import { buildDesired } from './gcal.js';
+import { buildDigest } from './digest.js';
+import { colorIdOf } from './domain.js';
 import {
-  getSetting, setSetting, deleteSetting, gcalMap, syncQueue, setGcalMap, deleteGcalMap, clearGcalMap,
-  setQueueItem, deleteQueueItem, clearQueue, exportAll, importAll,
+  all, get, getRaw, getSetting, setSetting, deleteSetting, gcalMap, syncQueue, setGcalMap, deleteGcalMap, clearGcalMap,
+  setQueueItem, deleteQueueItem, clearQueue, exportAll, importAll, countsOf, saveSnapshot, getSnapshot, saveMany, normalizeBackup,
 } from './store.js';
+import { DATA_VERSION } from './migrate.js';
 
 const BATCH = 10;
 const SYNC_DEBOUNCE = 1500;
 const BACKUP_DEBOUNCE = 30000;
 const RETRY_MS = 60000;
 const DAILY = 24 * 3600000;
+export const MAX_FEEDS = 50;
+export const GAS_VERSION_REQUIRED = 2;
 
 let running = false;
 let rerun = false;
@@ -21,6 +27,7 @@ let retryTimer = null;
 
 export const isLinked = () => !!(getSetting('gasUrl') && getSetting('gasSecret'));
 const announce = () => globalThis.dispatchEvent?.(new CustomEvent('sync-status'));
+export const gasOutdated = () => isLinked() && (getSetting('gasVersion', 1) < GAS_VERSION_REQUIRED);
 
 /** メールからのコピーで混ざる改行や空白を取り除く */
 export const cleanCredential = (s) => String(s ?? '').replace(/\s+/g, '');
@@ -45,7 +52,8 @@ export function gasUrlProblem(raw) {
 
 /** GAS から返るエラーを、対処が分かる文に置き換える */
 function explainGasError(error) {
-  if (error === 'unauthorized') return '合言葉が一致しません。setup のメールの合言葉をコピーし直してください';
+  if (error === 'unauthorized') return '合言葉が一致しません。合言葉を再発行した場合は、新しい合言葉を入れ直してください';
+  if (error === 'unknown action') return 'GAS が古い版です。README の「GAS を更新する」の手順で Code.gs を置き換えてください';
   if (/is not defined/.test(error || '')) {
     return `GAS の appsscript.json が反映されていません。README の手順で置き換えて「新しいバージョン」でデプロイし直してください（${error}）`;
   }
@@ -76,6 +84,7 @@ export async function callGas(action, params = {}, creds = null) {
     throw new Error('連携用URLの応答を読み取れません。デプロイの種類が「ウェブアプリ」で、「全員」に公開されているか確認してください');
   }
   if (!json.ok) throw new Error(explainGasError(json.error));
+  if (json.version) setSetting('gasVersion', json.version);
   return json;
 }
 
@@ -102,6 +111,8 @@ export function reconcile(now = Date.now()) {
 
 export function syncStatus() {
   const items = [...syncQueue.values()];
+  const feedStatus = getSetting('feedStatus', {});
+  const feedErrors = Object.values(feedStatus).filter((s) => s.error);
   return {
     linked: isLinked(),
     running,
@@ -110,12 +121,85 @@ export function syncStatus() {
     lastSyncAt: getSetting('lastSyncAt', null),
     lastBackupAt: getSetting('lastBackupAt', null),
     lastError: getSetting('lastError', null),
+    feedErrors,
+    outdated: gasOutdated(),
   };
+}
+
+/** 7日以上バックアップできていないか（F-MIG-07）。ファイルへの書き出しも数える */
+export function backupWarning(now = Date.now()) {
+  if (!all('programs').length) return null;
+  const last = Math.max(getSetting('lastBackupAt', 0) || 0, getSetting('lastExportAt', 0) || 0);
+  if (now - last < 7 * DAILY) return null;
+  return last ? `${Math.floor((now - last) / DAILY)}日間バックアップできていません` : 'まだバックアップがありません';
 }
 
 function scheduleRetry() {
   clearTimeout(retryTimer);
   retryTimer = setTimeout(() => syncNow(), RETRY_MS);
+}
+
+/** 新着検知の対象（F-FEED-01）。上限は MAX_FEEDS 件 */
+export function buildFeeds() {
+  const list = [];
+  for (const c of all('channels')) {
+    if (!c.rssUrl) continue;
+    const p = get('programs', c.programId);
+    if (!p || p.archived) continue;
+    list.push({
+      id: c.id,
+      programId: p.id,
+      programName: p.name,
+      url: c.rssUrl,
+      kind: c.rssKind || 'podcast',
+      include: c.feedInclude || [],
+      exclude: c.feedExclude || [],
+      calendar: c.feedCalendar === true,
+      notify: p.individualNotify === true,
+      colorId: colorIdOf(p.color),
+    });
+  }
+  return list.slice(0, MAX_FEEDS);
+}
+
+/** 新着の回を受け取り、端末に保存する。聴取済みなど端末側の記録は保つ */
+export async function pullFeedItems() {
+  const since = getSetting('feedPulledAt', 0);
+  const res = await callGas('feedItems', { since });
+  const rows = [];
+  for (const item of res.items || []) {
+    const existing = getRaw('feedItems', item.id);
+    if (existing) continue;
+    const channel = get('channels', item.channelId);
+    if (!channel) continue;
+    rows.push({ ...item, programId: channel.programId, listened: false, position: 0 });
+  }
+  if (rows.length) await saveMany('feedItems', rows);
+  setSetting('feedStatus', res.status || {});
+  setSetting('feedPulledAt', res.now || Date.now());
+  return rows.length;
+}
+
+async function pushExtras() {
+  if (gasOutdated()) return;
+  const feeds = buildFeeds();
+  const feedsHash = JSON.stringify(feeds);
+  const feedsChanged = feedsHash !== getSetting('feedsHash');
+  if (feedsChanged) {
+    await callGas('setFeeds', { feeds }); // 新しく登録した RSS は GAS がすぐに確認する
+    setSetting('feedsHash', feedsHash);
+  }
+  const digest = buildDigest();
+  const digestHash = JSON.stringify(digest);
+  if (digestHash !== getSetting('digestHash')) {
+    await callGas('setDigest', { digest });
+    setSetting('digestHash', digestHash);
+  }
+  // 新着の回の取得は5分に1回まで（GAS の実行量を節約する）
+  if (feedsChanged || Date.now() - getSetting('feedPullCheckedAt', 0) > 5 * 60000) {
+    await pullFeedItems();
+    setSetting('feedPullCheckedAt', Date.now());
+  }
 }
 
 /** 差分を送る。オフラインや未連携なら積むだけ。 */
@@ -161,6 +245,14 @@ export async function syncNow() {
       }
     }
     if (!hadError) {
+      try {
+        await pushExtras();
+      } catch (e) {
+        hadError = true;
+        setSetting('lastError', e.message);
+      }
+    }
+    if (!hadError) {
       setSetting('lastSyncAt', Date.now());
       deleteSetting('lastError');
     }
@@ -179,6 +271,8 @@ export async function syncNow() {
 export async function resyncAll() {
   for (const [key, row] of gcalMap) setGcalMap(key, { ...row, hash: null });
   clearQueue();
+  deleteSetting('feedsHash');
+  deleteSetting('digestHash');
   return syncNow();
 }
 
@@ -190,11 +284,24 @@ export function requestSync() {
   backupTimer = setTimeout(() => backupToDrive().catch(() => {}), BACKUP_DEBOUNCE);
 }
 
-export async function backupToDrive() {
+const deviceName = () => {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua)) return 'iPad';
+  if (/Android/.test(ua)) return 'Android';
+  return 'PC';
+};
+
+/** Google ドライブへバックアップ（F-GGL-04, F-MIG-01）。type は regular / pre-overwrite */
+export async function backupToDrive({ type = 'regular', data = null } = {}) {
   if (!isLinked() || navigator.onLine === false) return false;
-  const res = await callGas('backup', { data: JSON.stringify(exportAll()) });
-  setSetting('lastBackupAt', Date.now());
-  setSetting('backupDirty', false);
+  const json = data || exportAll();
+  const meta = { type, version: DATA_VERSION, counts: countsOf(json), device: deviceName(), createdAt: Date.now() };
+  const res = await callGas('backup', { data: JSON.stringify(json), meta });
+  if (type === 'regular') {
+    setSetting('lastBackupAt', Date.now());
+    setSetting('backupDirty', false);
+  }
   announce();
   return res;
 }
@@ -209,13 +316,42 @@ export function maintenance(now = Date.now()) {
 
 export const listDriveBackups = () => callGas('listBackups');
 
-export async function restoreFromDrive(id) {
-  const res = await callGas('restore', { id });
-  await importAll(JSON.parse(res.data));
-  setSetting('backupDirty', false);
-  await syncNow();
+/**
+ * 上書きの前に、いまの状態を端末内とドライブに残す（F-MIG-12）。
+ * ドライブへの保存に失敗しても、端末内の控えがあるので処理は続ける。
+ */
+export async function protectBeforeOverwrite(reason) {
+  const snap = await saveSnapshot(reason);
+  if (isLinked()) await backupToDrive({ type: 'pre-overwrite', data: snap.data }).catch(() => {});
+  return snap;
 }
 
+/** 全データを置き換える（復元・ファイル取り込み）。控えを取ってから行う */
+export async function replaceAllData(json, reason) {
+  normalizeBackup(json); // 壊れたファイルなら控えを取る前に止める
+  const snap = await protectBeforeOverwrite(reason);
+  await importAll(json);
+  setSetting('backupDirty', false);
+  await syncNow();
+  return snap;
+}
+
+export async function restoreFromDrive(id) {
+  const res = await callGas('restore', { id });
+  return replaceAllData(JSON.parse(res.data), 'ドライブから復元する前');
+}
+
+/** 「元に戻す」：控えの状態に戻す。戻す前の状態も控えに残す */
+export async function undoToSnapshot(key) {
+  const snap = await getSnapshot(key);
+  if (!snap) throw new Error('控えが見つかりません');
+  return replaceAllData(snap.data, '元に戻す前');
+}
+
+/**
+ * 連携の確認だけを行う。予定の送信とバックアップは、復元するかを決めてから finishConnect で行う（F-MIG-03）。
+ * 返り値の backups は新しい順。
+ */
 export async function connect(url, secret) {
   const res = await callGas('connect', {}, { url, secret });
   if (getSetting('calendarId') && getSetting('calendarId') !== res.calendarId) {
@@ -226,9 +362,23 @@ export async function connect(url, secret) {
   setSetting('gasSecret', secret);
   setSetting('calendarId', res.calendarId);
   deleteSetting('lastError');
-  await syncNow();
-  backupToDrive().catch(() => {});
-  return res;
+  deleteSetting('feedsHash');
+  deleteSetting('digestHash');
+  deleteSetting('feedPullCheckedAt');
+  let backups = [];
+  try {
+    backups = (await listDriveBackups()).backups || [];
+  } catch { /* 一覧が取れなくても連携は続ける */ }
+  return { ...res, backups: backups.filter((b) => b.meta?.type !== 'pre-overwrite') };
+}
+
+export async function finishConnect({ restoreId = null } = {}) {
+  if (restoreId) {
+    await restoreFromDrive(restoreId);
+  } else {
+    await syncNow();
+  }
+  await backupToDrive().catch(() => {});
 }
 
 export async function disconnect({ deleteCalendar }) {
@@ -239,11 +389,47 @@ export async function disconnect({ deleteCalendar }) {
   } catch (e) {
     warning = e.message;
   }
-  for (const k of ['gasUrl', 'gasSecret', 'calendarId', 'lastSyncAt', 'lastBackupAt', 'lastError']) deleteSetting(k);
+  for (const k of ['gasUrl', 'gasSecret', 'calendarId', 'lastSyncAt', 'lastBackupAt', 'lastError', 'feedsHash', 'digestHash', 'gasVersion']) deleteSetting(k);
   clearGcalMap();
   clearQueue();
   announce();
   return warning;
+}
+
+/** 合言葉の再発行（F-GGL-09）。古い合言葉はすぐ使えなくなる */
+export async function rotateSecret() {
+  const res = await callGas('rotateSecret');
+  setSetting('gasSecret', res.secret);
+  return res.secret;
+}
+
+/** 通知テスト（F-NTF-02）。数分後に鳴る予定を専用カレンダーに入れる */
+export const testNotification = (minutes = 3) => callGas('testNotification', { minutes });
+
+/** チャンネルURLなどから RSS を求め、中身を確かめる（F-FEED-02） */
+export const resolveFeed = (url) => callGas('resolveFeed', { url });
+
+// ---- 機種変更用の連携コード（F-MIG-05） ----
+
+const CODE_PREFIX = 'RCLINK1.';
+
+export function linkCode() {
+  const json = JSON.stringify({ u: getSetting('gasUrl'), s: getSetting('gasSecret') });
+  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return CODE_PREFIX + b64;
+}
+
+export function parseLinkCode(text) {
+  const s = cleanCredential(text);
+  if (!s.startsWith(CODE_PREFIX)) return null;
+  try {
+    const b64 = s.slice(CODE_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/');
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const { u, s: secret } = JSON.parse(new TextDecoder().decode(bytes));
+    return isValidGasUrl(u) && secret ? { url: u, secret } : null;
+  } catch {
+    return null;
+  }
 }
 
 export function startSyncLoop() {

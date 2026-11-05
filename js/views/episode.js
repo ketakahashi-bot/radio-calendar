@@ -1,12 +1,14 @@
 // 放送回詳細
 
 import { h, page, section, button, externalLink, colorDot, openForm, rerender, toast, confirmSheet } from '../ui.js';
-import { remove, save, byProgram, all } from '../store.js';
-import { occurrenceByKey, saveEpisode, catchupExpiry, hasOverride } from '../episodes.js';
+import { remove, byProgram, all } from '../store.js';
+import { occurrenceByKey, saveEpisode, catchupExpiry, timefreeStatus, radikoPlan } from '../episodes.js';
 import { mediaLabel, REMINDER_CHOICES, reminderLabel } from '../domain.js';
 import { dayToYmd, fmtDay, fmtHM, fmtInstant, jstDay, jstMin, parseHM, fmtRemaining } from '../time.js';
+import { composeX } from '../mail.js';
+import { xSearchUrl } from '../links.js';
 import { memoRows, openMemo } from './memos.js';
-import { notFound } from './programs.js';
+import { notFound, archiveProgram } from './programs.js';
 
 const STATUS = [
   { value: 'normal', label: '通常' },
@@ -20,7 +22,7 @@ function editEpisode(occ) {
   const fields = [
     { name: 'status', label: '状態', type: 'select', options: STATUS },
     { name: 'title', label: '回のタイトル（特番名など）' },
-    { name: 'overrideDate', label: '放送日', type: 'date', help: '時間変更・特番で日時が変わるときだけ入力します' },
+    { name: 'overrideDate', label: '放送日', type: 'date', help: '時間変更・特番で日時が変わるときだけ入力します。深夜は前日の日付（放送日）です' },
     { name: 'overrideStart', label: '開始時刻', placeholder: fmtHM(occ.startMin) },
     { name: 'overrideEnd', label: '終了時刻', placeholder: fmtHM(occ.endMin) },
   ];
@@ -39,6 +41,7 @@ function editEpisode(occ) {
     validate: (v) => {
       const e = {};
       if (timeErr(v.overrideStart)) e.overrideStart = '25:00 の形式で入力してください';
+      else if (v.overrideStart && (parseHM(v.overrideStart) < 300 || parseHM(v.overrideStart) >= 1740)) e.overrideStart = '開始時刻は 5:00〜28:59 で入力してください';
       if (timeErr(v.overrideEnd)) e.overrideEnd = '27:00 の形式で入力してください';
       if (v.status === 'changed' && !v.overrideStart) e.overrideStart = '変更後の開始時刻を入力してください';
       if (isStandalone && !v.overrideStart) e.overrideStart = '開始時刻を入力してください';
@@ -88,6 +91,27 @@ function editReminder(occ) {
   });
 }
 
+/** タイムフリーの聴き始めと聴いた時間（F-TF-04） */
+function timefreeSection(occ, now) {
+  if (occ.program.timefree === false) return h('p', { class: 'muted pad' }, 'この番組はタイムフリーで聴けない設定です（生で聴く番組）');
+  const hasRadiko = byProgram('channels', occ.program.id).some((c) => c.catchupMode === 'radiko');
+  if (!hasRadiko || occ.endMs > now || occ.listened) return null;
+  const tf = timefreeStatus(occ, now);
+  const addMinutes = (m) => { saveEpisode(occ, { listenedMinutes: Math.max((occ.episode?.listenedMinutes || 0) + m, 0) }); rerender(); };
+  return h('div', { class: 'card tf' },
+    tf
+      ? h('div', { class: 'row-main' },
+        h('strong', null, tf.expired ? '聴き始めてから24時間を過ぎました' : `24時間の残り ${fmtRemaining(tf.windowLeftMs)}`),
+        radikoPlan() === 'free' ? h('small', null, `聴いた時間 ${tf.usedMinutes}分・3時間の残り ${tf.leftMinutes}分`) : h('small', null, `聴いた時間 ${tf.usedMinutes}分`))
+      : h('div', { class: 'row-main' }, h('strong', null, 'タイムフリーで聴く'), h('small', null, radikoPlan() === 'free' ? '無料のタイムフリーは、聴き始めてから24時間以内に合計3時間まで聴けます' : 'タイムフリー30 は期限内なら時間の制限なく聴けます')),
+    h('div', { class: 'row-actions' },
+      tf ? null : button('聴き始めた', () => { saveEpisode(occ, { tfStartedAt: Date.now(), listenedMinutes: 0 }); rerender(); }, 'small primary'),
+      tf ? button('+15分', () => addMinutes(15), 'small') : null,
+      tf ? button('+30分', () => addMinutes(30), 'small') : null,
+      tf ? button('+60分', () => addMinutes(60), 'small') : null,
+      tf ? button('取り消し', () => { saveEpisode(occ, { tfStartedAt: null, listenedMinutes: 0 }); rerender(); }, 'small ghost') : null));
+}
+
 export function renderEpisode(key) {
   const occ = occurrenceByKey(decodeURIComponent(key));
   if (!occ) return notFound();
@@ -101,6 +125,7 @@ export function renderEpisode(key) {
   const now = Date.now();
   const onAirNow = occ.startMs <= now && now < occ.endMs && !cancelled;
   const label = STATUS.find((s) => s.value === occ.status)?.label;
+  const tags = p.hashtags || [];
 
   const addMemo = () => {
     const ep = occ.episode || saveEpisode(occ, {});
@@ -109,6 +134,12 @@ export function renderEpisode(key) {
   const reminderText = Array.isArray(occ.episode?.reminders)
     ? `${occ.episode.reminders.map(reminderLabel).join('・') || 'なし'}（この回のみ）`
     : `${(p.reminders ?? [15]).map(reminderLabel).join('・') || 'なし'}（番組の既定）`;
+  const finalEpisode = async () => {
+    if (!(await confirmSheet('この回を最終回にしますか？', { ok: '最終回にする', danger: true, detail: `${fmtDay(occ.day)} を放送期間の終了日にして、番組をアーカイブへ移します。以降の予定はカレンダーと Google カレンダーから外れます。` }))) return;
+    archiveProgram(p, ymd);
+    toast('最終回にしました');
+    location.hash = `#/program/${p.id}`;
+  };
 
   return page({ title: '放送回', back: '#/calendar', tab: 'calendar' },
     h('a', { class: 'prog-head link', href: `#/program/${p.id}`, style: `--c:${p.color}` },
@@ -123,24 +154,29 @@ export function renderEpisode(key) {
         onAirNow ? h('span', { class: 'onair-badge' }, 'ON AIR') : null,
         occ.status !== 'normal' ? h('span', { class: `tag tag-${occ.status}` }, label) : null,
         occ.title ? h('span', { class: 'tag' }, occ.title) : null),
+      tags.length ? h('div', { class: 'row-actions' },
+        button(onAirNow ? '実況する（放送中）' : '実況する', () => composeX({ program: p, text: `${tags.join(' ')} ` }), onAirNow ? 'primary' : 'small'),
+        externalLink('みんなの反応', xSearchUrl(tags.join(' OR ')), 'btn small')) : null,
       h('div', { class: 'row-actions' },
         button('この回を変更', () => editEpisode(occ), 'small'),
         !occ.schedule ? null : button(cancelled ? '休止を取り消す' : '休止にする', () => {
           saveEpisode(occ, { status: cancelled ? 'normal' : 'cancelled', overrideStart: '', overrideEnd: '', overrideDate: '' });
           toast(cancelled ? '休止を取り消しました' : '休止にしました');
           rerender();
-        }, 'small'))),
+        }, 'small'),
+        p.archived ? null : button('最終回にする', finalEpisode, 'small ghost danger'))),
     section('聴取',
       h('label', { class: 'check-row card' },
         h('input', { type: 'checkbox', checked: occ.listened, onchange: (e) => { saveEpisode(occ, { listened: e.target.checked }); rerender(); } }),
         h('span', null, '聴取済み')),
+      timefreeSection(occ, now),
       channels.length
         ? h('div', { class: 'list' }, channels.map((c) => {
           const start = occ.startMs + (c.offsetMin || 0) * 60000;
           const expiry = catchupExpiry(occ, c);
           const info = [];
           if (c.offsetMin) info.push(`配信 ${fmtInstant(start)}`);
-          if (expiry != null) info.push(expiry > now ? `聴き逃し期限 ${fmtInstant(expiry)}（あと${fmtRemaining(expiry - now)}）` : '聴き逃し期限切れ');
+          if (expiry != null) info.push(expiry > now ? `聴取期限 ${fmtInstant(expiry)}（あと${fmtRemaining(expiry - now)}）` : '聴取期限切れ');
           return h('div', { class: 'row' },
             h('span', { class: 'row-main' }, h('strong', null, [mediaLabel(c.mediaType), c.station].filter(Boolean).join(' ')), info.length ? h('small', null, info.join('・')) : null),
             c.url ? externalLink('聴く', c.url, 'btn small primary') : null);
@@ -152,5 +188,3 @@ export function renderEpisode(key) {
       memos.length ? memoRows(memos) : h('p', { class: 'muted pad' }, 'メモはまだありません'),
       h('div', { class: 'row-actions' }, button('＋ メモを追加', addMemo, 'small'))));
 }
-
-export { hasOverride, save };

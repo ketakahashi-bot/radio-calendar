@@ -58,7 +58,7 @@ export const CORNER_STATUS = [
 export const CONTACT_TYPES = [
   { value: 'email', label: 'メール' },
   { value: 'form', label: 'フォームURL' },
-  { value: 'hashtag', label: 'ハッシュタグ' },
+  { value: 'xhashtag', label: 'X のハッシュタグ' },
 ];
 
 export const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());

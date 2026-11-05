@@ -11,6 +11,7 @@
   --danger: #b3261e;
   --deadline: #c77700;
   --catchup: #6d4bc4;
+  --warn: #a35a00;
   --hour: 46px;
   --tabs-h: 56px;
 }
@@ -28,6 +29,7 @@
     --danger: #ff8a80;
     --deadline: #f0a63c;
     --catchup: #a98cf0;
+    --warn: #f0a63c;
   }
 }
 
@@ -90,7 +92,7 @@ strong { font-weight: 600; }
   inset: auto 0 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--surface);
   border-top: 1px solid var(--line);
@@ -420,3 +422,34 @@ textarea { resize: vertical; }
 .toast.error { background: var(--danger); color: #fff; }
 
 @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+
+/* 第2版で追加した部品 */
+.warn { color: var(--warn); font-weight: 600; }
+.notice.warn { display: block; color: var(--warn); font-weight: 600; border: 1px solid currentColor; background: transparent; }
+.chip-btn { min-height: 34px; padding: 3px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); color: var(--ink); font: inherit; font-size: .875rem; cursor: pointer; }
+.prog-icon .gicon { width: 24px; height: 24px; }
+.gicon { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.icon-pick { display: flex; flex-wrap: wrap; gap: 8px; }
+.icon-opt { position: relative; cursor: pointer; }
+.icon-opt input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.icon-opt span { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-weight: 700; }
+.icon-opt .gicon { width: 24px; height: 24px; }
+.icon-opt input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.icon-opt input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
+.stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.stat { display: flex; flex-direction: column; align-items: center; padding: 14px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.stat strong { font-size: 1.75rem; line-height: 1.2; }
+.help-box { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: .875rem; }
+.help-box summary { cursor: pointer; font-weight: 600; min-height: 32px; display: flex; align-items: center; }
+.help-box ol, .steps { margin: 6px 0 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 6px; }
+.steps { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 12px 12px 2em; }
+.sheet.center { text-align: center; }
+.sheet.center .sheet-actions { justify-content: center; }
+.qr { display: block; margin: 12px auto; width: min(260px, 80vw); max-width: 100%; height: auto; image-rendering: pixelated; border-radius: 8px; }
+.qr-video { display: block; width: 100%; max-height: 50dvh; margin: 8px 0; border-radius: 12px; background: #000; object-fit: cover; }
+.card.tf { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; }
+input.narrow { width: auto; min-width: 120px; }
+.toast.has-action { display: flex; align-items: center; gap: 12px; pointer-events: auto; }
+.toast-action { min-height: 36px; padding: 4px 12px; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.toast:not(.show) { pointer-events: none; }
+.tab span { white-space: nowrap; }
